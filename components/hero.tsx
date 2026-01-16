@@ -3,7 +3,7 @@ import { ArrowRight } from "lucide-react"
 
 export function Hero() {
   return (
-    <section className="relative overflow-hidden px-6 py-24 lg:px-8 sm:py-80">
+    <section className="relative overflow-hidden px-6 py-24 lg:px-8 sm:py-[440px]">
       <div className="mx-auto max-w-6xl text-center">
         <h1 className="whitespace-nowrap text-4xl font-semibold tracking-tight sm:text-6xl lg:text-8xl text-background text-center">
           Concept Lab Studios
