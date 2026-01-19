@@ -3,9 +3,6 @@ import { NextRequest, NextResponse } from "next/server"
 // Keep nodejs runtime (proj4 + large pagination is safer here than edge)
 export const runtime = "nodejs"
 
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const proj4 = require("proj4") as typeof import("proj4")
-
 const DATASET_URL = "https://data.cityofnewyork.us/resource/2x64-6f34.json"
 
 // Working-model pagination targets (~90k BK broom signs => ~18 pages @ 5000)
@@ -34,6 +31,18 @@ type AspPoint = {
   signText: string
 }
 
+type Proj4Fn = (from: any, to: any, coord: [number, number]) => [number, number]
+
+async function loadProj4(): Promise<Proj4Fn> {
+  // Handles ESM/CJS interop differences across builds
+  const mod: any = await import("proj4")
+  const fn = (mod?.default ?? mod) as any
+  if (typeof fn !== "function") {
+    throw new Error("proj4 import resolved, but is not a function (ESM/CJS interop issue)")
+  }
+  return fn as Proj4Fn
+}
+
 function toNum(v: string | null): number | null {
   if (v == null) return null
   const n = Number(v)
@@ -59,26 +68,8 @@ function cleanRuleText(raw: unknown): string {
   return t
 }
 
-// EPSG:2263 -> WGS84 (returns {lat,lon})
-function xyToLatLon(x: number, y: number): { lat: number; lon: number } | null {
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
-  try {
-    const [lon, lat] = proj4(EPSG2263, "WGS84", [x, y]) as [number, number]
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
-
-    // sanity bounds for NYC area
-    if (lat < 40.3 || lat > 41.2) return null
-    if (lon < -74.6 || lon > -73.4) return null
-
-    return { lat, lon }
-  } catch {
-    return null
-  }
-}
-
 function normalizeSideLetter(v: unknown): string {
   const s = String(v || "").trim().toUpperCase()
-  // dataset tends to have values like "N", "S", "E", "W" or longer strings
   if (s.startsWith("N")) return "N"
   if (s.startsWith("S")) return "S"
   if (s.startsWith("E")) return "E"
@@ -99,12 +90,10 @@ async function fetchPage(url: string, controller: AbortController, attempt: numb
     const res = await fetch(url, {
       signal: controller.signal,
       headers: { Accept: "application/json" },
-      // allow caching in platform, but not required
       next: { revalidate: 300 },
     })
 
     if (!res.ok) {
-      // retry on transient server errors
       if (res.status >= 500 && attempt < MAX_RETRIES) return null
       return []
     }
@@ -117,7 +106,35 @@ async function fetchPage(url: string, controller: AbortController, attempt: numb
 }
 
 export async function GET(req: NextRequest) {
-  console.log("ASP: GET hit")
+  // IMPORTANT: remove your old top-level console.log
+  // If you want logs, log inside GET (route must not crash before it can run)
+  console.log("ASP GET hit")
+
+  let proj4: Proj4Fn
+  try {
+    proj4 = await loadProj4()
+    console.log("proj4 loaded OK")
+  } catch (e: any) {
+    console.log("proj4 failed to load:", String(e?.message || e))
+    return NextResponse.json({ ok: false, points: [], partial: true, note: `proj4 load failed: ${String(e?.message || e)}` }, { status: 500 })
+  }
+
+  // EPSG:2263 -> WGS84 (returns {lat,lon})
+  function xyToLatLon(x: number, y: number): { lat: number; lon: number } | null {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+    try {
+      const [lon, lat] = proj4(EPSG2263, "WGS84", [x, y])
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null
+
+      // sanity bounds for NYC area
+      if (lat < 40.3 || lat > 41.2) return null
+      if (lon < -74.6 || lon > -73.4) return null
+
+      return { lat, lon }
+    } catch {
+      return null
+    }
+  }
 
   const url = new URL(req.url)
   const sp = url.searchParams
@@ -127,13 +144,11 @@ export async function GET(req: NextRequest) {
   const east = toNum(sp.get("east"))
   const north = toNum(sp.get("north"))
 
-  console.log("ASP: bbox parsed", { west, south, east, north })
-
   if (west == null || south == null || east == null || north == null) {
-    return NextResponse.json({ ok: false, error: "Missing bbox params: west,south,east,north" }, { status: 400 })
+    return NextResponse.json({ ok: false, points: [], partial: true, note: "Missing bbox params: west,south,east,north" }, { status: 400 })
   }
   if (!(west < east) || !(south < north)) {
-    return NextResponse.json({ ok: false, error: "Invalid bbox" }, { status: 400 })
+    return NextResponse.json({ ok: false, points: [], partial: true, note: "Invalid bbox" }, { status: 400 })
   }
 
   const controller = new AbortController()
@@ -143,9 +158,8 @@ export async function GET(req: NextRequest) {
   let partial = false
   let note: string | undefined
 
-  // SoQL filter: Brooklyn + current + broom sign (ASP)
-  // IMPORTANT: add bbox filter in EPSG:2263 so we don't scan the whole borough.
   try {
+    // Build bbox in EPSG:2263 (fast server-side narrowing)
     const corners: [number, number][] = [
       [west, south],
       [west, north],
@@ -153,24 +167,9 @@ export async function GET(req: NextRequest) {
       [east, north],
     ]
 
-    console.log("ASP: converting bbox corners -> EPSG2263")
-
-    let xy: [number, number][]
-    try {
-      xy = corners.map(
-        ([lon, lat]) => proj4("WGS84", EPSG2263, [lon, lat]) as [number, number]
-      )
-    } catch (e) {
-      console.error("ASP: proj4 conversion failed", e)
-      throw e
-    }
-
+    const xy = corners.map(([lon, lat]) => proj4("WGS84", EPSG2263, [lon, lat]))
     const xs = xy.map((p) => p[0]).filter(Number.isFinite)
     const ys = xy.map((p) => p[1]).filter(Number.isFinite)
-
-    if (xs.length === 0 || ys.length === 0) {
-      throw new Error("ASP: proj4 produced no finite coordinates")
-    }
 
     const xmin = Math.floor(Math.min(...xs) - 25)
     const xmax = Math.ceil(Math.max(...xs) + 25)
@@ -212,7 +211,6 @@ export async function GET(req: NextRequest) {
           rows = got
           break
         }
-        // backoff
         await sleep(BASE_BACKOFF_MS * attempt * attempt)
       }
 
@@ -222,14 +220,10 @@ export async function GET(req: NextRequest) {
         break
       }
 
-      if (rows.length === 0) {
-        // no more data
-        break
-      }
+      if (rows.length === 0) break
 
       for (const r of rows) {
-        const raw = r?.sign_description
-        const signText = cleanRuleText(raw)
+        const signText = cleanRuleText(r?.sign_description)
         if (!signText) continue
 
         const x = r?.sign_x_coord != null ? Number(r.sign_x_coord) : NaN
@@ -251,24 +245,16 @@ export async function GET(req: NextRequest) {
         })
       }
 
-      // If we got fewer than a full page, stop
       if (rows.length < PAGE_SIZE) break
     }
 
     return NextResponse.json(
       { ok: true, points, partial: partial || undefined, note },
-      {
-        headers: {
-          // short cache; upstream fetch is revalidated too
-          "Cache-Control": "public, max-age=30",
-        },
-      }
+      { headers: { "Cache-Control": "public, max-age=30" } }
     )
   } catch (err: any) {
-    console.error("ASP: fatal error", err)
-    partial = true
     note = `Error: ${String(err?.message || "asp error").slice(0, 180)}`
-    return NextResponse.json({ ok: false, points, partial: true, note }, { status: 500 })
+    return NextResponse.json({ ok: true, points, partial: true, note }, { status: 200 })
   } finally {
     clearTimeout(timeout)
   }

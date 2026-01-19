@@ -1,14 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { NextRequest, NextResponse } from "next/server";
 
-// Configure route to handle large files (up to 100MB)
-export const config = {
-  api: {
-    bodyParser: false,
-  },
-};
-
-export const maxDuration = 60; // Allow up to 60 seconds for upload
+export const maxDuration = 60; // Maximum allowed for hobby plan
 
 export async function POST(request: NextRequest) {
   try {
