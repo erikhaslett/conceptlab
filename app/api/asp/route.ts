@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 
+console.log("ASP route loaded – before proj4")
+
 // Keep nodejs runtime (proj4 + large pagination is safer here than edge)
 export const runtime = "nodejs"
 
@@ -46,7 +48,7 @@ function cleanRuleText(raw: unknown): string {
   let t = String(raw)
 
   // normalize whitespace & remove odd markers
-  t = t.replace(/['']/g, "'")
+  t = t.replace(/[’']/g, "'")
   t = t.replace(/\s+/g, " ").trim()
 
   // remove some known noisy fragments
@@ -139,21 +141,22 @@ export async function GET(req: NextRequest) {
   let partial = false
   let note: string | undefined
 
-    // SoQL filter: Brooklyn + current + broom sign (ASP)
-  // IMPORTANT: add bbox filter in EPSG:2263 so we don't scan the whole borough.
-  const corners: [number, number][] = [
-    [west, south],
-    [west, north],
-    [east, south],
-    [east, north],
+// SoQL filter: Brooklyn + current + broom sign (ASP)
+// IMPORTANT: add bbox filter in EPSG:2263 so we don't scan the whole borough.
+
+try {
+
+    const corners: [number, number][] = [
+      [west, south],
+      [west, north],
+      [east, south],
+      [east, north],
   ]
 
-  // proj4 returns [x, y] in EPSG:2263 when converting from WGS84 lon/lat
   const xy = corners.map(([lon, lat]) => proj4("WGS84", EPSG2263, [lon, lat]) as [number, number])
   const xs = xy.map((p) => p[0]).filter(Number.isFinite)
   const ys = xy.map((p) => p[1]).filter(Number.isFinite)
 
-  // Expand slightly and round outward for safety
   const xmin = Math.floor(Math.min(...xs) - 25)
   const xmax = Math.ceil(Math.max(...xs) + 25)
   const ymin = Math.floor(Math.min(...ys) - 25)
@@ -165,10 +168,8 @@ export async function GET(req: NextRequest) {
     " AND upper(sign_description) like '%BROOM%'" +
     ` AND sign_x_coord BETWEEN ${xmin} AND ${xmax}` +
     ` AND sign_y_coord BETWEEN ${ymin} AND ${ymax}`
-
-
-  try {
-    for (let page = 0; page < MAX_PAGES; page++) {
+    
+  for (let page = 0; page < MAX_PAGES; page++) {
       const offset = page * PAGE_SIZE
 
       const q = new URL(DATASET_URL)
@@ -248,11 +249,11 @@ export async function GET(req: NextRequest) {
         },
       }
     )
-  } catch (err: any) {
-    partial = true
-    note = `Error: ${String(err?.message || "asp error").slice(0, 180)}`
-    return NextResponse.json({ ok: true, points, partial: true, note }, { status: 200 })
-  } finally {
-    clearTimeout(timeout)
-  }
+    } catch (err: any) {
+      partial = true
+      note = `Error: ${String(err?.message || "asp error").slice(0, 180)}`
+      return NextResponse.json({ ok: true, points, partial: true, note }, { status: 200 })
+    } finally {
+      clearTimeout(timeout)
+    }
 }
