@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
 
-console.log("ASP route loaded – before proj4")
-
 // Keep nodejs runtime (proj4 + large pagination is safer here than edge)
 export const runtime = "nodejs"
 
@@ -119,6 +117,8 @@ async function fetchPage(url: string, controller: AbortController, attempt: numb
 }
 
 export async function GET(req: NextRequest) {
+  console.log("ASP: GET hit")
+
   const url = new URL(req.url)
   const sp = url.searchParams
 
@@ -126,6 +126,8 @@ export async function GET(req: NextRequest) {
   const south = toNum(sp.get("south"))
   const east = toNum(sp.get("east"))
   const north = toNum(sp.get("north"))
+
+  console.log("ASP: bbox parsed", { west, south, east, north })
 
   if (west == null || south == null || east == null || north == null) {
     return NextResponse.json({ ok: false, error: "Missing bbox params: west,south,east,north" }, { status: 400 })
@@ -141,35 +143,48 @@ export async function GET(req: NextRequest) {
   let partial = false
   let note: string | undefined
 
-// SoQL filter: Brooklyn + current + broom sign (ASP)
-// IMPORTANT: add bbox filter in EPSG:2263 so we don't scan the whole borough.
-
-try {
-
+  // SoQL filter: Brooklyn + current + broom sign (ASP)
+  // IMPORTANT: add bbox filter in EPSG:2263 so we don't scan the whole borough.
+  try {
     const corners: [number, number][] = [
       [west, south],
       [west, north],
       [east, south],
       [east, north],
-  ]
+    ]
 
-  const xy = corners.map(([lon, lat]) => proj4("WGS84", EPSG2263, [lon, lat]) as [number, number])
-  const xs = xy.map((p) => p[0]).filter(Number.isFinite)
-  const ys = xy.map((p) => p[1]).filter(Number.isFinite)
+    console.log("ASP: converting bbox corners -> EPSG2263")
 
-  const xmin = Math.floor(Math.min(...xs) - 25)
-  const xmax = Math.ceil(Math.max(...xs) + 25)
-  const ymin = Math.floor(Math.min(...ys) - 25)
-  const ymax = Math.ceil(Math.max(...ys) + 25)
+    let xy: [number, number][]
+    try {
+      xy = corners.map(
+        ([lon, lat]) => proj4("WGS84", EPSG2263, [lon, lat]) as [number, number]
+      )
+    } catch (e) {
+      console.error("ASP: proj4 conversion failed", e)
+      throw e
+    }
 
-  const where =
-    "upper(borough) like 'BROOKLYN%'" +
-    " AND record_type='Current'" +
-    " AND upper(sign_description) like '%BROOM%'" +
-    ` AND sign_x_coord BETWEEN ${xmin} AND ${xmax}` +
-    ` AND sign_y_coord BETWEEN ${ymin} AND ${ymax}`
-    
-  for (let page = 0; page < MAX_PAGES; page++) {
+    const xs = xy.map((p) => p[0]).filter(Number.isFinite)
+    const ys = xy.map((p) => p[1]).filter(Number.isFinite)
+
+    if (xs.length === 0 || ys.length === 0) {
+      throw new Error("ASP: proj4 produced no finite coordinates")
+    }
+
+    const xmin = Math.floor(Math.min(...xs) - 25)
+    const xmax = Math.ceil(Math.max(...xs) + 25)
+    const ymin = Math.floor(Math.min(...ys) - 25)
+    const ymax = Math.ceil(Math.max(...ys) + 25)
+
+    const where =
+      "upper(borough) like 'BROOKLYN%'" +
+      " AND record_type='Current'" +
+      " AND upper(sign_description) like '%BROOM%'" +
+      ` AND sign_x_coord BETWEEN ${xmin} AND ${xmax}` +
+      ` AND sign_y_coord BETWEEN ${ymin} AND ${ymax}`
+
+    for (let page = 0; page < MAX_PAGES; page++) {
       const offset = page * PAGE_SIZE
 
       const q = new URL(DATASET_URL)
@@ -249,11 +264,12 @@ try {
         },
       }
     )
-    } catch (err: any) {
-      partial = true
-      note = `Error: ${String(err?.message || "asp error").slice(0, 180)}`
-      return NextResponse.json({ ok: true, points, partial: true, note }, { status: 200 })
-    } finally {
-      clearTimeout(timeout)
-    }
+  } catch (err: any) {
+    console.error("ASP: fatal error", err)
+    partial = true
+    note = `Error: ${String(err?.message || "asp error").slice(0, 180)}`
+    return NextResponse.json({ ok: false, points, partial: true, note }, { status: 500 })
+  } finally {
+    clearTimeout(timeout)
+  }
 }
