@@ -746,11 +746,11 @@ export default function ASPMapClient() {
           </div>
 
           {/* Reset Map View */}
-          <div className="rounded-lg border border-border h-11 px-3" style={{ backgroundColor: "#e7f7ea" }}>
+          <div className="rounded-lg border border-border h-11 px-3 bg-[#e7f7ea] hover:bg-[#cfeedd] transition-colors">
             <Button
               variant="ghost"
               onClick={onReset}
-              className="w-full h-full text-sm font-semibold leading-none"
+              className="w-full h-full text-sm font-semibold leading-none hover:bg-[#cfeedd]"
               style={{ backgroundColor: "transparent", color: "#000000" }}
             >
               Reset Map View
@@ -758,11 +758,11 @@ export default function ASPMapClient() {
           </div>
 
           {/* Rule Suspension Calendar */}
-          <div className="rounded-lg border border-border h-11 px-3" style={{ backgroundColor: "#e7f7ea" }}>
+          <div className="rounded-lg border border-border h-11 px-3 bg-[#e7f7ea] hover:bg-[#cfeedd] transition-colors">
             <Button
               variant="ghost"
               onClick={() => setShowSuspensions(true)}
-              className="w-full h-full text-sm font-semibold leading-none whitespace-nowrap text-center"
+              className="w-full h-full text-sm font-semibold leading-none whitespace-nowrap text-center hover:bg-[#cfeedd]"
               style={{ backgroundColor: "transparent", color: "#000000" }}
             >
               Rule Suspension Calendar
@@ -796,8 +796,8 @@ export default function ASPMapClient() {
         variant="secondary"
         onClick={onGoToAddress}
         disabled={geocodeLoading || !addressQuery.trim()}
-        className="shrink-0 h-9 px-2 text-sm font-semibold leading-none border border-border disabled:opacity-100"
-        style={{ backgroundColor: "#e7f7ea", color: "#000000" }}
+        className="shrink-0 h-9 px-2 text-sm font-semibold leading-none border border-border bg-[#e7f7ea] hover:bg-[#cfeedd] transition-colors disabled:opacity-100"   
+        style={{ color: "#000000" }}
       >
         Go
       </Button>
@@ -831,8 +831,8 @@ export default function ASPMapClient() {
             <Button
               variant="secondary"
               onClick={onReset}
-              className="pointer-events-auto h-9 rounded-full px-3 text-sm font-semibold leading-none border border-border shadow"
-              style={{ backgroundColor: "#e7f7ea", color: "#000000" }}
+              className="pointer-events-auto h-9 rounded-full px-3 text-sm font-semibold leading-none border border-border shadow bg-[#e7f7ea] hover:bg-[#cfeedd] transition-colors"
+              style={{ color: "#000000" }}
             >
               Reset Map View
             </Button>
