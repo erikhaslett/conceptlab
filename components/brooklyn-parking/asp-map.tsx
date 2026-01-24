@@ -14,35 +14,24 @@ export type BBox = {
 
 export type BlockfaceLine = {
   id: string
-  // Leaflet expects [lat,lng]
   latlngs: [number, number][]
-  // Popup content
   street: string
   from: string
   to: string
-  sideLabel: string // e.g. "N side" / "S side" / "E side" / "W side"
+  sideLabel: string
   rule: string
 }
 
 type Props = {
-  // Rendering
   lines: BlockfaceLine[]
-
-  // View defaults / reset target
   defaultCenter: [number, number]
   defaultZoom: number
-
-  // UI state passed in
   isZoomEligible: boolean
-
-  // Map -> parent callbacks
   onViewportChange: (v: { bbox: BBox; zoom: number; center: [number, number] }) => void
-  // Parent increments this to force reset
   resetNonce: number
-
-  // Address search -> map jump + pin
   goTo?: { lat: number; lon: number; label?: string } | null
   goToNonce?: number
+  onMapReady?: (map: L.Map) => void
 }
 
 function computeBBox(map: L.Map): BBox {
@@ -57,12 +46,11 @@ function computeBBox(map: L.Map): BBox {
   }
 }
 
-/**
- * Minimal + safe Leaflet resize handling.
- * - No repeated setView calls (those can be expensive and feel “slow”)
- * - Only invalidateSize when map is ready and panes exist
- * - Throttled to once per animation frame
- */
+const BROOKLYN_MAX_BOUNDS = L.latLngBounds(
+  [40.50988387630726, -74.13728713989259],
+  [40.79379856838544, -73.73079299926759]
+)
+
 function FixLeafletResize() {
   const map = useMap()
 
@@ -73,23 +61,14 @@ function FixLeafletResize() {
 
     const safeInvalidate = () => {
       if (isUnmounted) return
-
-      // Guard against calling invalidateSize while Leaflet is mid-init or after unmount.
       const anyMap: any = map as any
-      if (!anyMap?._loaded) return
-      if (!anyMap?._mapPane) return
-
+      if (!anyMap?._loaded || !anyMap?._mapPane) return
       try {
         map.invalidateSize()
-      } catch {
-        // swallow — we prefer no crash over aggressive fixing
-      }
+      } catch {}
     }
 
-    // One post-mount invalidate after first paint (fast + usually sufficient)
-    const t = window.setTimeout(() => {
-      safeInvalidate()
-    }, 0)
+    const t = window.setTimeout(safeInvalidate, 0)
 
     const container = map.getContainer?.()
     if (container && typeof ResizeObserver !== "undefined") {
@@ -134,7 +113,6 @@ function ViewportReporter({
     },
   })
 
-  // Fire once on mount so client has initial bbox/zoom
   useEffect(() => {
     const bbox = computeBBox(map)
     const zoom = map.getZoom()
@@ -160,23 +138,17 @@ function ResetHandler({
   useEffect(() => {
     const isInitial = resetNonce === 0
     let isUnmounted = false
-
     const anyMap: any = map as any
 
     map.whenReady(() => {
       if (isUnmounted) return
-
       map.setView(defaultCenter, defaultZoom, { animate: !isInitial })
-
-      // Single safe invalidate after reset (avoid multi-timeout thrash)
       requestAnimationFrame(() => {
         if (isUnmounted) return
         if (!anyMap?._loaded || !anyMap?._mapPane) return
         try {
           map.invalidateSize()
-        } catch {
-          // ignore
-        }
+        } catch {}
       })
     })
 
@@ -199,29 +171,20 @@ function GoToHandler({
   const [pin, setPin] = useState<{ lat: number; lon: number; label?: string } | null>(null)
 
   useEffect(() => {
-    // If parent clears the target (e.g. Reset view), clear pin too.
     if (!goTo) {
       setPin(null)
       return
     }
-
     if (!Number.isFinite(goTo.lat) || !Number.isFinite(goTo.lon)) return
-
     setPin(goTo)
     map.setView([goTo.lat, goTo.lon], 17, { animate: true })
   }, [map, goTo, goToNonce])
 
-  // Simple circle pin (avoids Leaflet default icon asset issues in Next)
   const icon = useMemo(
     () =>
       L.divIcon({
         className: "",
-        html: `<div style="
-          width:14px;height:14px;border-radius:9999px;
-          background:#2563eb;
-          border:2px solid white;
-          box-shadow:0 2px 8px rgba(0,0,0,0.25);
-        "></div>`,
+        html: `<div style="width:14px;height:14px;border-radius:9999px;background:#2563eb;border:2px solid white;box-shadow:0 2px 8px rgba(0,0,0,0.25);"></div>`,
         iconSize: [14, 14],
         iconAnchor: [7, 7],
       }),
@@ -242,19 +205,134 @@ function GoToHandler({
   )
 }
 
-export default function ASPMap({
-  lines,
-  defaultCenter,
-  defaultZoom,
-  isZoomEligible,
-  onViewportChange,
-  resetNonce,
-  goTo,
-  goToNonce,
-}: Props) {
-  const [hoveredId, setHoveredId] = useState<string | null>(null)
+// (1) Bridge: expose the Leaflet map instance upward (for custom zoom controls later)
+function ZoomController({ onReady }: { onReady?: (map: L.Map) => void }) {
+  const map = useMap()
+  useEffect(() => {
+    onReady?.(map)
+  }, [map, onReady])
+  return null
+}
 
-  // gate MapContainer mount until container has a real size
+/**
+ * Borough mask — RESTORED, EXACT LOGIC
+ */
+function BoroughMask() {
+  const map = useMap()
+  const layerRef = useRef<L.Polygon | null>(null)
+
+  useEffect(() => {
+    let isUnmounted = false
+
+    async function run() {
+      try {
+        const res = await fetch("/brooklyn/outline.geojson", { cache: "force-cache" })
+        if (!res.ok) throw new Error(`outline fetch failed`)
+        const fc = await res.json()
+        const geom = fc?.features?.[0]?.geometry
+        if (!geom) throw new Error("missing geometry")
+
+        // WORLD outer ring
+        const outerRing: [number, number][] = [
+          [85, -180],
+          [85, 180],
+          [-85, 180],
+          [-85, -180],
+        ]
+
+        const rings: [number, number][][] = [outerRing]
+
+        type LngLat = [number, number]
+
+        function ringArea(r: LngLat[]) {
+          let a = 0
+          for (let i = 0; i < r.length; i++) {
+            const [x1, y1] = r[i]
+            const [x2, y2] = r[(i + 1) % r.length]
+            a += x1 * y2 - x2 * y1
+          }
+          return Math.abs(a / 2)
+        }
+
+        function pushPolygon(poly: any) {
+          for (const ring of poly) {
+            const latlng = ring
+              .map((p: any) => [p[1], p[0]] as [number, number])
+              .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]))
+            if (latlng.length >= 3) rings.push(latlng)
+          }
+        }
+
+        if (geom.type === "Polygon") {
+          pushPolygon(geom.coordinates)
+        } else if (geom.type === "MultiPolygon") {
+          let best: any = null
+          let bestArea = -1
+          for (const poly of geom.coordinates) {
+            const area = ringArea(poly[0])
+            if (area > bestArea) {
+              bestArea = area
+              best = poly
+            }
+          }
+          if (best) pushPolygon(best)
+        }
+
+        if (isUnmounted) return
+
+        if (layerRef.current) layerRef.current.remove()
+
+        const mask = L.polygon(rings as any, {
+          interactive: false,
+          stroke: false,
+          fill: true,
+          fillColor: "#303234",
+          fillOpacity: 0.3,
+          fillRule: "evenodd",
+        })
+
+        mask.addTo(map)
+        layerRef.current = mask
+      } catch (e) {
+        console.warn("BoroughMask failed:", e)
+      }
+    }
+
+    run()
+
+    return () => {
+      isUnmounted = true
+      if (layerRef.current) layerRef.current.remove()
+    }
+  }, [map])
+
+  return null
+}
+
+function MapReadyReporter({ onMapReady }: { onMapReady?: (map: L.Map) => void }) {
+  const map = useMap()
+
+  useEffect(() => {
+    if (onMapReady) onMapReady(map)
+  }, [map, onMapReady])
+
+  return null
+}
+
+export default function ASPMap(props: Props) {
+  const {
+    lines,
+    defaultCenter,
+    defaultZoom,
+    isZoomEligible,
+    onViewportChange,
+    resetNonce,
+    goTo,
+    goToNonce,
+    onMapReady, // (1)
+  } = props
+
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [containerReady, setContainerReady] = useState(false)
 
@@ -267,7 +345,6 @@ export default function ASPMap({
     let deadman: number | null = null
     let isUnmounted = false
 
-
     const markReady = () => {
       if (done || isUnmounted) return
       done = true
@@ -279,79 +356,53 @@ export default function ASPMap({
     const check = () => {
       if (done || isUnmounted) return
       const r = el.getBoundingClientRect()
-      // Only mount Leaflet once we have a meaningful size (prevents partial/strip render)
-      if (r.width >= 200 && r.height >= 200) {
-        markReady()
-      }
+      if (r.width >= 200 && r.height >= 200) markReady()
     }
 
-    // DEADMAN: guarantee mount even if ResizeObserver/threshold never triggers.
-    // Keeps the gate, but makes it impossible to hang forever.
-    deadman = window.setTimeout(() => {
-      markReady()
-    }, 750)
-
+    deadman = window.setTimeout(markReady, 750)
     check()
 
     if (typeof ResizeObserver !== "undefined") {
-      ro = new ResizeObserver(() => check())
+      ro = new ResizeObserver(check)
       ro.observe(el)
-    } else {
-      // fallback: one extra tick
-      const t = window.setTimeout(check, 0)
-      return () => {
-        isUnmounted = true
-        window.clearTimeout(t)
-        if (deadman != null) window.clearTimeout(deadman)
-      }
     }
 
     return () => {
-      isUnmounted = true    
+      isUnmounted = true
       if (deadman != null) window.clearTimeout(deadman)
       if (ro) ro.disconnect()
     }
   }, [])
 
-  // Default lines should be faint until hovered
-  const basePolyStyle = useMemo(
-    () => ({
-      weight: 5,
-      opacity: 0.35,
-    }),
-    []
-  )
-
-  // Hovered line becomes fully visible
-  const activePolyStyle = useMemo(
-    () => ({
-      weight: 5,
-      opacity: 0.9,
-    }),
-    []
-  )
-
-  // A wider invisible “hit area” makes clicking easier without changing appearance.
-  const hitStyle = useMemo(
-    () => ({
-      weight: 14,
-      opacity: 0,
-    }),
-    []
-  )
+  const basePolyStyle = useMemo(() => ({ weight: 5, opacity: 0.35 }), [])
+  const activePolyStyle = useMemo(() => ({ weight: 5, opacity: 0.9 }), [])
+  const hitStyle = useMemo(() => ({ weight: 14, opacity: 0 }), [])
 
   return (
     <div ref={containerRef} className="h-full w-full relative">
-      <style jsx global>{`
-        /* Move the entire top-left control stack (zoom buttons) to vertical middle */
-        .leaflet-top.leaflet-left {
-          top: 39% !important;
-          transform: translateY(-50%) !important;
-        }
-      `}</style>
-
       {containerReady ? (
-        <MapContainer center={defaultCenter} zoom={defaultZoom} scrollWheelZoom className="h-full w-full" preferCanvas>
+        <MapContainer
+          center={defaultCenter}
+          zoom={defaultZoom}
+          minZoom={13}
+          // (2) hide Leaflet default +/- controls
+          zoomControl={false}
+          maxBounds={BROOKLYN_MAX_BOUNDS}
+          maxBoundsViscosity={1.0}
+          scrollWheelZoom
+          className="h-full w-full"
+          preferCanvas
+        >
+          {/* (2) belt-and-suspenders: also hide any zoom UI if something re-adds it */}
+          <style jsx global>{`
+            .leaflet-control-zoom {
+              display: none !important;
+            }
+          `}</style>
+
+          {/* (1) expose map instance for custom zoom controls later */}
+          <ZoomController onReady={onMapReady} />
+
           <FixLeafletResize />
           <ViewportReporter onViewportChange={onViewportChange} />
           <ResetHandler defaultCenter={defaultCenter} defaultZoom={defaultZoom} resetNonce={resetNonce} />
@@ -362,7 +413,8 @@ export default function ASPMap({
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
 
-          {/* Draw lines only when parent says we are zoom-eligible */}
+          <BoroughMask />
+
           {isZoomEligible &&
             lines.map((ln) => {
               const isActive = hoveredId === ln.id
@@ -370,16 +422,7 @@ export default function ASPMap({
 
               return (
                 <div key={ln.id}>
-                  {/* Visible line (non-interactive) */}
-                  <Polyline
-                    positions={ln.latlngs}
-                    pathOptions={{
-                      ...visibleStyle,
-                      interactive: false,
-                    }}
-                  />
-
-                  {/* Invisible hit line (handles hover + click + popup) */}
+                  <Polyline positions={ln.latlngs} pathOptions={{ ...visibleStyle, interactive: false }} />
                   <Polyline
                     positions={ln.latlngs}
                     pathOptions={hitStyle}

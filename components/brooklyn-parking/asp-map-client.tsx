@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import dynamic from "next/dynamic"
 import useSWR from "swr"
-import { MapPin, Loader2 } from "lucide-react"
+import Link from "next/link"
+import { Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import L from "leaflet"
 
 type BBox = { west: number; south: number; east: number; north: number }
 type Viewport = { bbox: BBox; zoom: number; center: [number, number] }
@@ -93,11 +95,12 @@ const MIN_ZOOM_TO_LOAD = 17
 const OFFSET_METERS = 6
 
 // Expand sliced segment so blocks don't collapse to the ends (parks, long runs)
-const SLICE_PADDING_METERS = 60
+const SLICE_PADDING_METERS = 20
 
 function fmt(n: unknown, digits = 5) {
   return typeof n === "number" && Number.isFinite(n) ? n.toFixed(digits) : "--"
 }
+
 function cleanRuleForPopup(raw: string) {
   let t = String(raw || "")
 
@@ -111,70 +114,6 @@ function cleanRuleForPopup(raw: string) {
 
   return t
 }
-
-type AspSuspension = { name: string; when: string; meters: string }
-
-// Display rules:
-// - Fixed-date: "Month Day"
-// - Weekday-rule: "Rule text"
-// - Date-varies: "Date varies — typically falls in <Month/Range>"
-const ALT_STREET_PARKING_SUSPENSIONS: AspSuspension[] = [
-  { name: "New Year's Day", when: "January 1", meters: "Parking meters NOT in effect." },
-  { name: "Three Kings' Day", when: "January 6", meters: "Parking meters in effect." },
-  { name: "Martin Luther King Jr", when: "3rd Monday in January", meters: "Parking meters in effect." },
-  { name: "Lincoln's Birthday", when: "February 12", meters: "Parking meters in effect." },
-  { name: "Washington's Birthday (Presidents Day)", when: "3rd Monday in February", meters: "Parking meters in effect." },
-
-  { name: "Lunar New Year's Eve", when: "Date varies — typically falls in February", meters: "Parking meters in effect." },
-  { name: "Lunar New Year", when: "Date varies — typically falls in February", meters: "Parking meters in effect." },
-  { name: "Losar (Tibetan New Year)", when: "Date varies — typically falls in February", meters: "Parking meters in effect." },
-  { name: "Ash Wednesday", when: "Date varies — typically falls in February–March", meters: "Parking meters in effect." },
-
-  { name: "Purim", when: "Date varies — typically falls in February–March", meters: "Parking meters in effect." },
-
-  { name: "Idul-Fitr (Eid Al-Fitr)", when: "Date varies — typically falls in March–April", meters: "Parking meters in effect." },
-
-  { name: "Passover", when: "Date varies — typically falls in March–April", meters: "Parking meters in effect." },
-  { name: "Holy Thursday", when: "Date varies — typically falls in March–April", meters: "Parking meters in effect." },
-  { name: "Good Friday", when: "Date varies — typically falls in March–April", meters: "Parking meters in effect." },
-  { name: "the seventh and eighth days of Passover", when: "Date varies — typically falls in April", meters: "Parking meters in effect." },
-  { name: "Orthodox Holy Thursday", when: "Date varies — typically falls in March–April", meters: "Parking meters in effect." },
-  { name: "Orthodox Good Friday", when: "Date varies — typically falls in March–April", meters: "Parking meters in effect." },
-
-  { name: "Solemnity of the Ascension", when: "Date varies — typically falls in May–June", meters: "Parking meters in effect." },
-  { name: "Shavuoth", when: "Date varies — typically falls in May–June", meters: "Parking meters in effect." },
-
-  { name: "Memorial Day", when: "Last Monday in May", meters: "Parking meters NOT in effect." },
-
-  { name: "Idul-Adha (Eid Al-Adha)", when: "Date varies — typically falls in May–June", meters: "Parking meters in effect." },
-
-  { name: "Juneteenth", when: "June 19", meters: "Parking meters in effect." },
-  { name: "Independence Day", when: "July 4", meters: "Parking meters NOT in effect." },
-
-  { name: "Tisha B'Av", when: "Date varies — typically falls in July–August", meters: "Parking meters in effect." },
-  { name: "Feast of the Assumption", when: "August 15", meters: "Parking meters in effect." },
-
-  { name: "Labor Day", when: "1st Monday in September", meters: "Parking meters NOT in effect." },
-
-  { name: "Rosh Hashanah", when: "Date varies — typically falls in September–October", meters: "Parking meters in effect." },
-  { name: "Yom Kippur", when: "Date varies — typically falls in September–October", meters: "Parking meters in effect." },
-  { name: "Succoth", when: "Date varies — typically falls in September–October", meters: "Parking meters in effect." },
-  { name: "Shemini Atzereth", when: "Date varies — typically falls in September–October", meters: "Parking meters in effect." },
-  { name: "Simchas Torah", when: "Date varies — typically falls in September–October", meters: "Parking meters in effect." },
-
-  { name: "Columbus Day", when: "2nd Monday in October", meters: "Parking meters in effect." },
-
-  { name: "All Saints' Day", when: "November 1", meters: "Parking meters in effect." },
-  { name: "Election Day", when: "Tuesday after the first Monday in November", meters: "Parking meters in effect." },
-
-  { name: "Diwali", when: "Date varies — typically falls in October–November", meters: "Parking meters in effect." },
-
-  { name: "Veterans Day", when: "November 11", meters: "Parking meters in effect." },
-  { name: "Thanksgiving Day", when: "4th Thursday in November", meters: "Parking meters NOT in effect." },
-
-  { name: "Immaculate Conception", when: "December 8", meters: "Parking meters in effect." },
-  { name: "Christmas Day", when: "December 25", meters: "Parking meters NOT in effect." },
-]
 
 function normalizeStreetName(s: string) {
   let t = (s || "")
@@ -235,7 +174,14 @@ function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number)
   return 2 * R * Math.asin(Math.sqrt(a))
 }
 
-function pointToSegmentMeters(pLat: number, pLon: number, aLat: number, aLon: number, bLat: number, bLon: number) {
+function pointToSegmentMeters(
+  pLat: number,
+  pLon: number,
+  aLat: number,
+  aLon: number,
+  bLat: number,
+  bLon: number
+) {
   const lat0 = (aLat + bLat + pLat) / 3
   const mx = metersPerDegLon(lat0)
   const my = metersPerDegLat()
@@ -442,10 +388,12 @@ function extractCenterlineFeatures(data: unknown): CenterlineFeature[] {
 }
 
 export default function ASPMapClient() {
+  const [mapRef, setMapRef] = useState<L.Map | null>(null)
+
   const [viewport, setViewport] = useState<Viewport | null>(null)
   const [resetNonce, setResetNonce] = useState(0)
-  const [showSuspensions, setShowSuspensions] = useState(false)
 
+  const [addressOpen, setAddressOpen] = useState(false)
   const [addressQuery, setAddressQuery] = useState("")
   const [geocodeLoading, setGeocodeLoading] = useState(false)
   const [geocodeError, setGeocodeError] = useState("")
@@ -602,24 +550,22 @@ export default function ASPMapClient() {
   }, [aspError, clError, computedBuildError])
 
   const status = useMemo(() => {
-    if (!viewport) return { title: "Ready", subtitle: "Zoom/pan the map.", tone: "neutral" as const }
+    if (!viewport) return { tone: "neutral" as const, text: "Zoom in to street level (17+) to load parking rules." }
 
     if (!isZoomEligible) {
       return {
-        title: "Zoom in to 17+ to load rules",
-        subtitle: `Zoom to street level (zoom ${MIN_ZOOM_TO_LOAD}+).`,
         tone: "neutral" as const,
+        text: "Zoom in to street level (17+) to load parking rules.",
       }
     }
 
-    if (aspLoading || clLoading)
-      return { title: "Loading visible area…", subtitle: "Fetching and snapping…", tone: "loading" as const }
+    if (aspLoading || clLoading) return { tone: "loading" as const, text: "Loading visible area…" }
 
     const anyErr = buildError
-    if (anyErr) return { title: "Error loading data", subtitle: String(anyErr).slice(0, 220), tone: "error" as const }
+    if (anyErr) return { tone: "error" as const, text: "Error loading data" }
 
-    return { title: "Ready", subtitle: `Showing ${lines.length} clickable areas.`, tone: "ok" as const }
-  }, [viewport, isZoomEligible, aspLoading, clLoading, lines.length, buildError])
+    return { tone: "ok" as const, text: "" }
+  }, [viewport, isZoomEligible, aspLoading, clLoading, buildError])
 
   const onGoToAddress = useCallback(async () => {
     const q = addressQuery.trim()
@@ -675,6 +621,7 @@ export default function ASPMapClient() {
       if (didSucceed) {
         setAddressQuery("")
         setGeocodeError("")
+        setAddressOpen(false)
       }
     }
   }, [addressQuery])
@@ -696,199 +643,256 @@ export default function ASPMapClient() {
   }, [])
 
   return (
-    <div className="h-screen w-screen flex flex-col overflow-hidden">
-      <div className="flex flex-1 overflow-hidden min-h-0">
-        {/* LEFT SIDEBAR */}
-        <aside
-          className="w-72 bg-muted border-r border-border p-4 pt-8 flex flex-col gap-4 shrink-0 overflow-y-auto"
-          style={{ backgroundColor: "#d9d9d9" }}
+    <div className="h-screen w-screen relative overflow-hidden">
+      {/* MAP */}
+      <div className="absolute inset-0">
+        <ASPMap
+          lines={lines}
+          defaultCenter={DEFAULT_CENTER}
+          defaultZoom={DEFAULT_ZOOM}
+          isZoomEligible={isZoomEligible}
+          resetNonce={resetNonce}
+          goTo={goToTarget}
+          goToNonce={goToNonce}
+          onMapReady={(map) => setMapRef(map)}
+          onViewportChange={({ bbox, zoom, center }: { bbox: BBox; zoom: number; center: [number, number] }) => {
+            if (!bbox || typeof zoom !== "number" || !center) return
+            if (
+              ![bbox.west, bbox.south, bbox.east, bbox.north, center[0], center[1]].every((n) => Number.isFinite(n))
+            )
+              return
+
+            const key = `${zoom.toFixed(3)}|${center[0].toFixed(5)},${center[1].toFixed(5)}|${bbox.west.toFixed(
+              5
+            )},${bbox.south.toFixed(5)},${bbox.east.toFixed(5)},${bbox.north.toFixed(5)}`
+            if (key === lastKeyRef.current) return
+            lastKeyRef.current = key
+
+            if (viewportDebounceRef.current) window.clearTimeout(viewportDebounceRef.current)
+            viewportDebounceRef.current = window.setTimeout(() => {
+              setViewport({ bbox, zoom, center })
+            }, 200)
+          }}
+        />
+      </div>
+
+      {/* DESKTOP LEFT PANEL (overlay, not sidebar) */}
+      <div className="hidden md:block absolute left-6 top-[30%] z-[1200] pointer-events-none">
+        <div className="pointer-events-auto">
+
+  {/* ===================== */}
+  {/* TOP AREA — TITLE ONLY */}
+  {/* ===================== */}
+  <div className="-mt-20 mb-17">
+   <div style={{ fontFamily: "'Bebas Neue', sans-serif" }} className="select-none">
+    <div className="bk-title text-[100px] leading-none uppercase text-white">BROOKLYN</div>
+  </div>
+
+  <style jsx>{`
+    .bk-title {
+      text-shadow: 6px 6px 0 #000;
+    }
+  `}</style>
+</div>
+
+
+  {/* ===================== */}
+  {/* MIDDLE AREA — RULES + ZOOM */}
+  {/* ===================== */}
+  <div className="mt-4">
+    {/* RULES POD */}
+    <div className="mt-4 w-[310px] bg-white border-2 border-black px-4 py-2 rounded-full">
+      <div className="text-[12px] font-bold uppercase tracking-wide text-black leading-tight text-center">
+        Zoom to street level (17+) to load.
+        <br />
+        Tap blue lines to view parking rules.
+      </div>
+    </div>
+
+    {/* CURRENT ZOOM + +/- */}
+    <div className="mt-3 w-[310px] flex items-center justify-between">
+      <div className="flex items-center gap-2 pl-1">
+        <div className="text-black font-bold uppercase tracking-wide text-base">Current</div>
+        <div className="w-12 h-12 rounded-full border-2 border-black bg-white flex items-center justify-center">
+          <span className="text-black font-bold text-lg">{fmt(viewport?.zoom, 0)}</span>
+        </div>
+        <div className="text-black font-bold uppercase tracking-wide text-base">Zoom</div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => mapRef?.zoomOut()}
+          disabled={!mapRef}
+          className="w-10 h-10 border-2 border-black bg-white font-bold text-xl leading-none"
         >
-          {/* Sidebar title */}
-          <div
-            className="text-center"
-            style={{
-              marginTop: "10px",
-              marginBottom: "32px",
-              fontFamily: "'Bebas Neue', sans-serif",
-            }}
-          >
-            <div style={{ fontSize: "64px", fontWeight: "bold", lineHeight: 1, textTransform: "uppercase" }}>Brooklyn</div>
-            <div style={{ fontSize: "28px", lineHeight: 1, textTransform: "uppercase", marginTop: "-2px" }}>
-              Alt Side Parking Finder
-            </div>
+          −
+        </button>
+
+        <button
+          onClick={() => mapRef?.zoomIn()}
+          disabled={!mapRef}
+          className="w-10 h-10 border-2 border-black bg-white font-bold text-xl leading-none"
+        >
+          +
+        </button>
+      </div>
+    </div>
+  </div>
+
+  {/* ===================== */}
+  {/* BOTTOM AREA — BUTTONS */}
+  {/* ===================== */}
+  <div className="mt-18 w-[310px] flex flex-col gap-3">
+    <Button
+      onClick={onReset}
+      className="h-12 w-full rounded-full border-2 border-black bg-[#79D49A] hover:bg-[#67C989] text-black font-bold uppercase"
+    >
+      Reset Map View
+    </Button>
+
+    <Button
+      onClick={() => {
+        setGeocodeError("")
+        setAddressOpen(true)
+      }}
+      className="h-12 w-full rounded-full border-2 border-black bg-[#79D49A] hover:bg-[#67C989] text-black font-bold uppercase"
+    >
+      Address Search
+    </Button>
+
+    <Button
+      asChild
+      className="h-12 w-full rounded-full border-2 border-black bg-[#4D8AC9] hover:bg-[#3F7FBE] text-black font-bold uppercase"
+    >
+      <Link href="/">Back To Main Page</Link>
+    </Button>
+    </div>
+   </div>
+ </div>
+
+{/* MOBILE TOP STACK (TITLE + RULES + ZOOM) */}
+<div className="md:hidden absolute top-6 left-0 right-0 z-[1200] px-4 pointer-events-none">
+  <div className="pointer-events-auto w-full flex flex-col items-center">
+    {/* TITLE */}
+    <div style={{ fontFamily: "'Bebas Neue', sans-serif" }} className="w-full text-center select-none">
+      <div
+        className="text-[85px] leading-none uppercase text-white"
+        style={{ textShadow: "6px 6px 0 rgba(0,0,0,1)" }}
+      >
+        BROOKLYN
+      </div>
+    </div>
+
+    {/* RULES + ZOOM (desktop middle block) */}
+    <div className="mt-4 w-[310px] flex flex-col items-center">
+      {/* RULES POD */}
+      <div className="w-full bg-white border-2 border-black px-4 py-2 rounded-full">
+        <div className="text-[12px] font-bold uppercase tracking-wide text-black leading-tight text-center">
+          Zoom to street level (17+) to load.
+          <br />
+          Tap blue lines to view parking rules.
+        </div>
+      </div>
+
+      {/* CURRENT ZOOM + +/- */}
+      <div className="mt-3 w-full flex justify-center">
+        <div className="flex items-center gap-2">
+          <div className="text-black font-bold uppercase tracking-wide text-base">Current</div>
+          <div className="w-12 h-12 rounded-full border-2 border-black bg-white flex items-center justify-center">
+            <span className="text-black font-bold text-lg">{fmt(viewport?.zoom, 0)}</span>
           </div>
-
-         {/* Instructions block */}
-<div className="rounded-lg border border-border bg-white px-4 py-4 mt-3 min-h-[160px] grid">
-  <div className="w-full grid place-content-center gap-3">
-    <div className="text-lg font-semibold text-center">Instructions</div>
-
-    <div className="flex justify-center">
-      <div className="grid grid-cols-[18px_auto] gap-x-2 gap-y-1 text-left">
-        <div className="text-sm font-semibold text-right tabular-nums">1.</div>
-        <div className="text-sm font-semibold">Move map in any direction</div>
-
-        <div className="text-sm font-semibold text-right tabular-nums">2.</div>
-        <div className="text-sm font-semibold">Zoom in to 17+ to load rules</div>
-
-        <div className="text-sm font-semibold text-right tabular-nums">3.</div>
-        <div className="text-sm font-semibold">Click on any blue street line</div>
+          <div className="text-black font-bold uppercase tracking-wide text-base">Zoom</div>
+        </div>
       </div>
     </div>
   </div>
 </div>
 
-          {/* Current Zoom Level */}
-          <div className="rounded-lg border border-border bg-white p-3">
-            <div className="text-sm font-semibold text-center">
-              Current Zoom Level: <span className="text-foreground">{fmt(viewport?.zoom, 0)}</span>
-            </div>
-          </div>
 
-          {/* Reset Map View */}
-          <div className="rounded-lg border border-border h-11 px-3 bg-[#e7f7ea] hover:bg-[#cfeedd] transition-colors">
-            <Button
-              variant="ghost"
-              onClick={onReset}
-              className="w-full h-full text-sm font-semibold leading-none hover:bg-[#cfeedd]"
-              style={{ backgroundColor: "transparent", color: "#000000" }}
-            >
-              Reset Map View
-            </Button>
-          </div>
-
-          {/* Rule Suspension Calendar */}
-          <div className="rounded-lg border border-border h-11 px-3 bg-[#e7f7ea] hover:bg-[#cfeedd] transition-colors">
-            <Button
-              variant="ghost"
-              onClick={() => setShowSuspensions(true)}
-              className="w-full h-full text-sm font-semibold leading-none whitespace-nowrap text-center hover:bg-[#cfeedd]"
-              style={{ backgroundColor: "transparent", color: "#000000" }}
-            >
-              Rule Suspension Calendar
-            </Button>
-          </div>
-
-         {/* Address Search (lowest) */}
-<div className="rounded-lg border border-border bg-white px-4 py-4 min-h-[160px] grid">
-  <div className="w-full grid place-content-center gap-3">
-    <div className="text-lg font-semibold text-center">Address Search</div>
-
-    <div className="text-center">
-      <div className="text-sm font-semibold whitespace-nowrap">Numbered Street Address Only</div>
-    </div>
-
-    <div className="flex items-center gap-2 w-full overflow-hidden">
-      <input
-        value={addressQuery}
-        onChange={(e) => setAddressQuery(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key !== "Enter") return
-          if (!addressQuery.trim()) return
-          e.preventDefault()
-          if (!geocodeLoading) onGoToAddress()
-        }}
-        placeholder="Type Address Here"
-        className="min-w-0 w-0 flex-1 h-9 rounded-md border border-border bg-background px-3 text-xs outline-none"
-      />
+      {/* MOBILE BOTTOM CONTROLS */}
+<div className="md:hidden absolute left-0 right-0 bottom-10 z-[1200] px-4 pointer-events-none">
+  <div className="pointer-events-auto w-full flex flex-col items-center">
+    <div className="w-[310px] flex flex-col gap-3">
+      <Button
+        onClick={onReset}
+        className="h-12 w-full rounded-full border-2 border-black bg-[#79D49A] hover:bg-[#67C989] text-black font-bold uppercase"
+      >
+        Reset Map View
+      </Button>
 
       <Button
-        variant="secondary"
-        onClick={onGoToAddress}
-        disabled={geocodeLoading || !addressQuery.trim()}
-        className="shrink-0 h-9 px-2 text-sm font-semibold leading-none border border-border bg-[#e7f7ea] hover:bg-[#cfeedd] transition-colors disabled:opacity-100"   
-        style={{ color: "#000000" }}
+        onClick={() => {
+          setGeocodeError("")
+          setAddressOpen(true)
+        }}
+        className="h-12 w-full rounded-full border-2 border-black bg-[#79D49A] hover:bg-[#67C989] text-black font-bold uppercase"
       >
-        Go
+        Address Search
       </Button>
-    </div>
 
-    {/* Reserve space so centering doesn't jump */}
-    <div className="h-4 text-xs text-center">
-      {geocodeError ? <span className="text-destructive">{geocodeError}</span> : null}
+      <Button
+        asChild
+        className="h-12 w-full rounded-full border-2 border-black bg-[#4D8AC9] hover:bg-[#3F7FBE] text-black font-bold uppercase"
+      >
+        <Link href="/">Back To Main Page</Link>
+      </Button>
     </div>
   </div>
 </div>
 
-        </aside>
 
-        <main className="flex-1 relative min-h-0 overflow-hidden">
-          <div className="absolute top-9 left-1/2 -translate-x-1/2 z-[1000] flex items-center gap-2 pointer-events-none">
-            <div className="pointer-events-auto rounded-full bg-white/95 border border-border shadow px-3 py-2 text-sm font-semibold">
-              {status.tone === "loading"
-                ? "Loading visible area…"
-                : status.tone === "error"
-                ? "Error loading data"
-                : isZoomEligible
-                ? `Displaying ${lines.length} street rules`
-                : "Zoom in to 17+ to load rules"}
-            </div>
-
-            <div className="pointer-events-auto rounded-full bg-white/95 border border-border shadow px-3 py-2 text-sm font-semibold">
-              Current Zoom Level: {fmt(viewport?.zoom, 0)}
-            </div>
-
-            <Button
-              variant="secondary"
-              onClick={onReset}
-              className="pointer-events-auto h-9 rounded-full px-3 text-sm font-semibold leading-none border border-border shadow bg-[#e7f7ea] hover:bg-[#cfeedd] transition-colors"
-              style={{ color: "#000000" }}
-            >
-              Reset Map View
-            </Button>
-          </div>
-
-          <div className="absolute inset-0">
-            <ASPMap
-              lines={lines}
-              defaultCenter={DEFAULT_CENTER}
-              defaultZoom={DEFAULT_ZOOM}
-              isZoomEligible={isZoomEligible}
-              resetNonce={resetNonce}
-              goTo={goToTarget}
-              goToNonce={goToNonce}
-              onViewportChange={({ bbox, zoom, center }: { bbox: BBox; zoom: number; center: [number, number] }) => {
-                if (!bbox || typeof zoom !== "number" || !center) return
-                if (![bbox.west, bbox.south, bbox.east, bbox.north, center[0], center[1]].every((n) => Number.isFinite(n)))
-                  return
-
-                const key = `${zoom.toFixed(3)}|${center[0].toFixed(5)},${center[1].toFixed(5)}|${bbox.west.toFixed(5)},${bbox.south.toFixed(5)},${bbox.east.toFixed(5)},${bbox.north.toFixed(5)}`
-                if (key === lastKeyRef.current) return
-                lastKeyRef.current = key
-
-                if (viewportDebounceRef.current) window.clearTimeout(viewportDebounceRef.current)
-                viewportDebounceRef.current = window.setTimeout(() => {
-                  setViewport({ bbox, zoom, center })
-                }, 200)
-              }}
-            />
-          </div>
-        </main>
-      </div>
-
-      {showSuspensions && (
+      {/* ADDRESS SEARCH POPUP (opened by button) */}
+      {addressOpen && (
         <div className="fixed inset-0 z-[2000]">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setShowSuspensions(false)} />
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => {
+              if (!geocodeLoading) setAddressOpen(false)
+            }}
+          />
           <div className="absolute inset-0 flex items-center justify-center p-4">
-            <div className="w-full max-w-lg rounded-xl border border-border shadow-lg bg-white">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-                <div className="text-base font-semibold">Alt Street Parking suspension dates</div>
-                <Button variant="ghost" className="h-8 px-2" onClick={() => setShowSuspensions(false)}>
-                  Close
-                </Button>
-              </div>
+            <div className="w-full max-w-xl rounded-xl border-2 border-black bg-white">
+              <div className="p-6">
+                <div className="flex items-center justify-between">
+                  <div className="text-base font-bold uppercase text-black">Type in address</div>
+                  <Button
+                    variant="ghost"
+                    className="h-8 px-2 text-black"
+                    onClick={() => {
+                      if (!geocodeLoading) setAddressOpen(false)
+                    }}
+                  >
+                    Close
+                  </Button>
+                </div>
 
-              <div className="max-h-[70vh] overflow-y-auto px-4 py-3">
-                <div className="text-sm text-muted-foreground mb-3">Alt Street Parking is suspended on these dates.</div>
+                <div className="mt-3 text-sm font-semibold text-black">Number and Street Only</div>
 
-                <div className="space-y-3">
-                  {ALT_STREET_PARKING_SUSPENSIONS.map((x, i) => (
-                    <div key={`${x.name}-${i}`} className="rounded-lg border border-border p-3">
-                      <div className="text-sm font-semibold">{x.name}</div>
-                      <div className="text-sm mt-1">{x.when}</div>
-                      {x.meters ? <div className="text-xs text-muted-foreground mt-1">{x.meters}</div> : null}
-                    </div>
-                  ))}
+                <div className="mt-3 flex items-center gap-2 w-full overflow-hidden">
+                  <input
+                    value={addressQuery}
+                    onChange={(e) => setAddressQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== "Enter") return
+                      if (!addressQuery.trim()) return
+                      e.preventDefault()
+                      if (!geocodeLoading) onGoToAddress()
+                    }}
+                    placeholder="Type Address Here"
+                    className="min-w-0 basis-2/3 h-10 rounded-none border-2 border-black bg-white px-3 text-sm outline-none text-black"
+                  />
+
+                  <Button
+                    onClick={onGoToAddress}
+                    disabled={geocodeLoading || !addressQuery.trim()}
+                    className="shrink-0 h-10 px-4 rounded-md border-2 border-black bg-[#79D49A] hover:bg-[#67C989] text-black font-bold uppercase disabled:opacity-100"
+                  >
+                    {geocodeLoading ? "…" : "Go"}
+                  </Button>
+                </div>
+
+                <div className="mt-3 h-4 text-sm font-semibold text-center">
+                  {geocodeError ? <span className="text-red-600">{geocodeError}</span> : null}
                 </div>
               </div>
             </div>
