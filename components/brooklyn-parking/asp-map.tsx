@@ -387,6 +387,8 @@ export default function ASPMap(props: Props) {
           minZoom={13}
           // (2) hide Leaflet default +/- controls
           zoomControl={false}
+          // (CHANGE) do not close popups just because the map was clicked/touched
+          closePopupOnClick={false}
           maxBounds={BROOKLYN_MAX_BOUNDS}
           maxBoundsViscosity={1.0}
           scrollWheelZoom
@@ -431,7 +433,12 @@ export default function ASPMap(props: Props) {
                       mouseout: () => setHoveredId((cur) => (cur === ln.id ? null : cur)),
                     }}
                   >
-                    <Popup>
+                    <Popup
+                      // (CHANGE) keep popup open during map interactions; user can still close via X
+                      closeOnClick={false}
+                      autoClose={false}
+                      closeButton={true}
+                    >
                       <div style={{ minWidth: 220 }}>
                         <div style={{ fontWeight: 700, marginBottom: 6 }}>{ln.street}</div>
                         <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 8 }}>
